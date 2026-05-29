@@ -52,6 +52,7 @@ OKX_SECRET_KEY = _env("OKX_SECRET_KEY", "YOUR_SECRET_KEY")
 OKX_PASSPHRASE = _env("OKX_PASSPHRASE", "YOUR_PASSPHRASE")
 OKX_BASE_URL   = _env("OKX_BASE_URL", "https://www.okx.com")
 DEMO_MODE      = _env_bool("DEMO_MODE", True)
+OKX_TIMEOUT_SEC = _env_float("OKX_TIMEOUT_SEC", 30.0)
 
 # ─── 거래 대상 ─────────────────────────────────────────
 SYMBOL         = _env("SYMBOL", "ETH-USDT")

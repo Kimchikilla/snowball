@@ -312,6 +312,7 @@ LLM 프롬프트에 이탈 기간별 가이드라인이 주입되어, 24h 이상
 | 항목 | 기본값 | 설명 |
 |------|--------|------|
 | `SYMBOL` | `ETH-USDT` | 거래 대상 심볼 |
+| `OKX_TIMEOUT_SEC` | `30.0` | OKX REST API read timeout. tradingBot API가 느릴 때 늘린다 |
 | `TOTAL_BUDGET` | `88000.0` | USDT 총 투입 예산 |
 | `GRID_BUDGET` | `48000.0` | 그리드에 사용할 금액 |
 | `GRID_LOWER` / `GRID_UPPER` | `2000.0` / `2400.0` | 그리드 하단/상단 가격 |

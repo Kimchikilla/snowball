@@ -60,6 +60,20 @@ class FakeGridController(GridController):
         pass
 
 
+class QueryFailGridController(FakeGridController):
+    def __init__(self):
+        super().__init__()
+        self.bot_id = None
+        self.start_called = False
+
+    def sync_existing_bot(self):
+        return {"status": "query_failed", "msg": "timeout"}
+
+    def start_grid(self, lower=None, upper=None, count=None, mode=None):
+        self.start_called = True
+        return super().start_grid(lower, upper, count, mode)
+
+
 def make_agent():
     agent = object.__new__(GridAgent)
     agent.holding_qty = 0.0
@@ -160,6 +174,14 @@ class RiskControlTests(unittest.TestCase):
         self.assertGreaterEqual(new_range, 625.0)
         self.assertEqual(controller.current_grid_num, 10)
         self.assertEqual(controller.current_mode, "arithmetic")
+
+    def test_grid_lookup_failure_does_not_start_duplicate_bot(self):
+        controller = QueryFailGridController()
+
+        result = controller.ensure_grid_running()
+
+        self.assertFalse(controller.start_called)
+        self.assertEqual(result["status"], "sync_failed")
 
     def test_restart_guard_blocks_widen_when_losing_without_realized_edge(self):
         agent = make_agent()

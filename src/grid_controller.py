@@ -13,7 +13,7 @@ _RETRY_DELAY = 2
 
 from config import (
     OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE,
-    OKX_BASE_URL, DEMO_MODE,
+    OKX_BASE_URL, DEMO_MODE, OKX_TIMEOUT_SEC,
     SYMBOL, GRID_LOWER, GRID_UPPER, GRID_COUNT, GRID_MODE,
     GRID_BUDGET, ATR_PERIOD
 )
@@ -36,7 +36,10 @@ class GridController:
         self.current_upper: Optional[float] = None   # 현재 그리드 상한
         self.current_grid_num: Optional[int] = None  # 현재 그리드 개수
         self.current_mode: Optional[str] = None      # arithmetic / geometric
-        self.client = httpx.Client(base_url=OKX_BASE_URL, timeout=10)
+        self.client = httpx.Client(
+            base_url=OKX_BASE_URL,
+            timeout=httpx.Timeout(OKX_TIMEOUT_SEC, connect=10.0),
+        )
 
     # ─── 유틸리티 ─────────────────────────────────────────────
 
@@ -156,6 +159,18 @@ class GridController:
         sync = self.sync_existing_bot()
         if sync.get("status") == "synced":
             return sync
+        if sync.get("status") not in ("no_bots",):
+            self._log(
+                f"기존 봇 조회가 실패하여 새 그리드 생성을 중단합니다 "
+                f"(status={sync.get('status')}, msg={sync.get('msg', sync.get('resp', ''))})",
+                level="ERROR",
+            )
+            return {
+                "code": "-1",
+                "status": "sync_failed",
+                "msg": "existing grid lookup failed; refusing to start a duplicate bot",
+                "sync": sync,
+            }
 
         # 없으면 새로 시작
         return self.start_grid(lower, upper, count)
