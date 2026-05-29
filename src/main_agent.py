@@ -330,6 +330,7 @@ class GridAgent:
         self.grid_breakout_notified: bool = False            # 이탈 알림 발송 여부
         self.BREAKOUT_WAIT_SEC: int = config.BREAKOUT_WAIT_HOURS * 3600            # LLM 판단 요청까지 대기
         self.BREAKOUT_HARD_TIMEOUT_SEC: int = config.BREAKOUT_HARD_TIMEOUT_HOURS * 3600  # 강제 SHIFT 한도
+        self._restored_bot_snapshot: dict = {}
 
         # 날짜 롤오버 감지용
         self._current_date: str = datetime.now().strftime("%Y-%m-%d")
@@ -428,6 +429,39 @@ class GridAgent:
                 f"{'─' * 28}\n"
                 f"루프 간격: {config.LOOP_INTERVAL_SEC}초\n"
                 f"손절 기준: {config.MAX_LOSS_PERCENT}%"
+            )
+
+        elif resp.get("status") == "sync_failed":
+            snapshot = self._restored_bot_snapshot or {}
+            if snapshot.get("bot_id"):
+                self.controller.bot_id = snapshot.get("bot_id")
+                self.controller.current_lower = snapshot.get("current_lower") or config.GRID_LOWER
+                self.controller.current_upper = snapshot.get("current_upper") or config.GRID_UPPER
+                self.controller.current_grid_num = snapshot.get("current_grid_num") or config.GRID_COUNT
+                self.controller.current_mode = snapshot.get("current_mode") or config.GRID_MODE
+                mode_label = "캐시된 봇 ID로 계속"
+                retry_label = "pending 목록 조회 없이 캐시된 bot_id로 운용합니다."
+            else:
+                self.controller.current_lower = config.GRID_LOWER
+                self.controller.current_upper = config.GRID_UPPER
+                self.controller.current_grid_num = config.GRID_COUNT
+                self.controller.current_mode = config.GRID_MODE
+                mode_label = "모니터링 모드로 계속"
+                retry_label = "다음 틱마다 기존 봇 동기화를 다시 시도합니다."
+            self._refresh_bot_label()
+            print(f"\n{RED}{BOLD}{'═' * 56}{RESET}")
+            print(f"{RED}{BOLD}  ⚠️ 기존 그리드봇 조회 실패 — {mode_label}{RESET}")
+            print(f"{RED}{'═' * 56}{RESET}")
+            print(f"  OKX tradingBot 조회가 실패했지만 새 봇은 만들지 않습니다.")
+            print(f"  {retry_label}")
+            print(f"  사용 범위: {self.controller.current_lower:,.2f} ~ {self.controller.current_upper:,.2f}")
+            print(f"{RED}{'═' * 56}{RESET}\n")
+            self.notifier.send(
+                f"⚠️ 기존 그리드봇 조회 실패 | {config.SYMBOL}\n"
+                f"새 봇 생성은 차단됨\n"
+                f"{retry_label}\n"
+                f"상태: {mode_label}\n"
+                f"사용 범위: {self.controller.current_lower:,.2f} ~ {self.controller.current_upper:,.2f}"
             )
 
         else:
@@ -855,6 +889,15 @@ class GridAgent:
 
     def _execute(self, action: str, signal: MarketSignal, price: float):
         """액션을 실제 API 호출로 변환."""
+
+        if action != "MAINTAIN" and not self.controller.bot_id:
+            self._log(f"봇 ID 미동기화 상태라 {action} 실행 스킵", level="WARNING")
+            self.notifier.send(
+                f"⚠️ 액션 스킵 | {config.SYMBOL}\n"
+                f"액션: {action}\n"
+                f"사유: 기존 봇 ID 미동기화"
+            )
+            return
 
         if action == "MAINTAIN":
             self.controller.ensure_grid_running()
@@ -1472,6 +1515,12 @@ class GridAgent:
                 "realized_pnl": self.realized_pnl,
                 "entry_price": self.entry_price,
                 "last_fill_id": self.last_fill_id,
+                # 봇 연결 상태
+                "bot_id": self.controller.bot_id,
+                "current_lower": self.controller.current_lower,
+                "current_upper": self.controller.current_upper,
+                "current_grid_num": self.controller.current_grid_num,
+                "current_mode": self.controller.current_mode,
                 # 메타
                 "symbol": config.SYMBOL,
             }
@@ -1511,6 +1560,31 @@ class GridAgent:
         self.grid_breakout_time = self._str_to_dt(state.get("grid_breakout_time"))
         self.grid_breakout_dir = state.get("grid_breakout_dir")
         self.grid_breakout_notified = bool(state.get("grid_breakout_notified", False))
+        restored_bot_id = state.get("bot_id")
+        restored_runtime = {
+            "bot_id": restored_bot_id,
+            "current_lower": None,
+            "current_upper": None,
+            "current_grid_num": None,
+            "current_mode": state.get("current_mode"),
+        }
+        try:
+            current_lower = state.get("current_lower")
+            current_upper = state.get("current_upper")
+            if current_lower not in (None, ""):
+                restored_runtime["current_lower"] = float(current_lower)
+                self.controller.current_lower = restored_runtime["current_lower"]
+            if current_upper not in (None, ""):
+                restored_runtime["current_upper"] = float(current_upper)
+                self.controller.current_upper = restored_runtime["current_upper"]
+            current_grid_num = state.get("current_grid_num")
+            if current_grid_num not in (None, ""):
+                restored_runtime["current_grid_num"] = int(current_grid_num)
+                self.controller.current_grid_num = restored_runtime["current_grid_num"]
+            self.controller.current_mode = restored_runtime["current_mode"] or self.controller.current_mode
+            self._restored_bot_snapshot = restored_runtime
+        except (TypeError, ValueError):
+            self._log("저장된 그리드 런타임 상태 일부가 유효하지 않아 무시", level="WARNING")
         self.grid_restart_times = [
             dt for dt in (self._str_to_dt(s) for s in state.get("grid_restart_times", []))
             if dt is not None

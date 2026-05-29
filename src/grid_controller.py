@@ -64,7 +64,11 @@ class GridController:
         try:
             resp = self._get(
                 "/api/v5/tradingBot/grid/orders-algo-pending",
-                params={"algoOrdType": "grid"}
+                params={
+                    "algoOrdType": "grid",
+                    "instType": "SPOT",
+                    "instId": SYMBOL,
+                }
             )
 
             if resp.get("code") != "0":
@@ -137,7 +141,7 @@ class GridController:
         try:
             resp = self._get(
                 "/api/v5/tradingBot/grid/orders-algo-pending",
-                params={"algoOrdType": "grid"}
+                params={"algoOrdType": "grid", "instType": "SPOT"}
             )
             if resp.get("code") != "0":
                 return []
