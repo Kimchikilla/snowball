@@ -387,9 +387,10 @@ class GridAgent:
             print(f"{GREEN}{'─' * 56}{RESET}")
             print(f"  {CYAN}기존 설정에 맞춰 에이전트를 시작합니다.{RESET}\n")
 
-            # 진입가를 현재가로 세팅 (손절 기준)
+            # Only initialize entry_price when there is no restored state.
+            # Risk checks use the live average cost when holdings exist.
             entry = self.fetcher.get_current_price()
-            if entry:
+            if entry and self.entry_price is None:
                 self.entry_price = entry
 
             pnl_emoji = "📈" if pnl >= 0 else "📉"
@@ -569,19 +570,28 @@ class GridAgent:
         print(f"  └────────────────────────────────────────────┘")
 
         # 3. 손절 체크
-        print(f"\n{DIM}[3/10]{RESET} {BOLD}손절 조건 체크{RESET} ─ 진입가 대비 {config.MAX_LOSS_PERCENT}% 이상 손실?")
+        print(f"\n{DIM}[3/10]{RESET} {BOLD}손절 조건 체크{RESET} ─ 평균단/총손익 기준 {config.MAX_LOSS_PERCENT}% 이상 손실?")
         try:
-            if self._check_stop_loss(price):
+            stop_status = self._stop_loss_status(price)
+            if stop_status["triggered"]:
                 print(f"  {RED}{BOLD}✗ 손절 조건 도달! 긴급 청산 실행{RESET}")
                 self.controller.emergency_stop()
-                self.notifier.send(f"💀 손절 청산 | {config.SYMBOL} | 현재가={price:,.0f}")
+                self.notifier.send(
+                    f"💀 손절 청산 | {config.SYMBOL} | 현재가={price:,.0f}\n"
+                    f"사유: {stop_status['reason']}"
+                )
                 return
         except Exception as e:
             print(f"  {RED}✗ 체크 실패: {e}{RESET}")
+            stop_status = None
 
-        if self.entry_price:
-            loss_pct = (self.entry_price - price) / self.entry_price * 100
-            print(f"  {GREEN}✓{RESET} 진입가={self.entry_price:,.0f} | 현재 손익={-loss_pct:+.2f}% | 한도={config.MAX_LOSS_PERCENT}%")
+        if stop_status and stop_status["basis_price"] > 0:
+            print(
+                f"  {GREEN}✓{RESET} 기준={stop_status['basis_price']:,.0f} "
+                f"({stop_status['basis']}) | 가격손익={-stop_status['price_loss_pct']:+.2f}% | "
+                f"총손익={stop_status['total_pnl']:+,.2f} "
+                f"({stop_status['total_pnl_pct']:+.2f}%) | 한도={config.MAX_LOSS_PERCENT}%"
+            )
         else:
             print(f"  {GREEN}✓{RESET} 정상 (진입가 미설정)")
 
@@ -725,29 +735,42 @@ class GridAgent:
     def _detect_events(self, signal: MarketSignal, price: float) -> list[str]:
         """이벤트 감지: 에이전트 호출이 필요한 상황인지 판별."""
         events = []
-        gl = self.controller.current_lower
-        gu = self.controller.current_upper
+        trigger_score = float(getattr(config, "LLM_TRIGGER_SCORE", 55) or 55)
+        trend = getattr(signal, "trend", "SIDEWAYS")
+        trend_strength = float(getattr(signal, "trend_strength", 0.0) or 0.0)
+        atr_spike = (
+            signal.atr_avg > 0
+            and signal.atr_current >= signal.atr_avg * 3
+        )
+        volume_spike = signal.volume_ratio >= 5.0
+        strong_trend = trend != "SIDEWAYS" and trend_strength >= 25
 
-        # 1. 가격이 그리드 상/하단 80% 도달
-        if gl is not None and gu is not None and gu > gl:
-            grid_range = gu - gl
-            position_pct = (price - gl) / grid_range * 100
-            if position_pct >= 80:
-                events.append(f"가격이 그리드 상단 {position_pct:.0f}% 도달")
-            elif position_pct <= 20:
-                events.append(f"가격이 그리드 하단 {position_pct:.0f}% 도달")
-
-        # 2. ATR 급등 (평균의 3배 이상)
-        if signal.atr_avg > 0 and signal.atr_current >= signal.atr_avg * 3:
-            events.append(f"ATR 급등 ({signal.atr_current:.1f} / 평균 {signal.atr_avg:.1f} = {signal.atr_current/signal.atr_avg:.1f}배)")
-
-        # 3. 리스크 스코어 60 이상
-        if signal.risk_score >= 60:
-            events.append(f"리스크 스코어 {signal.risk_score:.1f}/100")
-
-        # 4. 거래량 급등 (5배 이상)
-        if signal.volume_ratio >= 5.0:
-            events.append(f"거래량 폭발 ({signal.volume_ratio:.1f}x)")
+        # 그리드 경계 80% 도달은 체결 자리라 LLM 호출 사유가 아니다.
+        # 실제 범위 이탈은 _check_grid_breakout()에서 별도로 다룬다.
+        if signal.risk_score >= trigger_score:
+            events.append(
+                f"리스크 스코어 {signal.risk_score:.1f}/100 "
+                f"(호출 기준 {trigger_score:.0f})"
+            )
+            if atr_spike:
+                events.append(
+                    f"ATR 급등 ({signal.atr_current:.1f} / 평균 "
+                    f"{signal.atr_avg:.1f} = {signal.atr_current/signal.atr_avg:.1f}배)"
+                )
+            if volume_spike:
+                events.append(f"거래량 폭발 ({signal.volume_ratio:.1f}x)")
+            if strong_trend:
+                events.append(f"강한 {trend} 추세 (ADX={trend_strength:.1f})")
+        elif atr_spike and strong_trend:
+            events.append(
+                f"ATR 급등 + 강한 {trend} 추세 "
+                f"(ATR {signal.atr_current/signal.atr_avg:.1f}배, ADX={trend_strength:.1f})"
+            )
+        elif volume_spike and strong_trend:
+            events.append(
+                f"거래량 폭발 + 강한 {trend} 추세 "
+                f"(Vol={signal.volume_ratio:.1f}x, ADX={trend_strength:.1f})"
+            )
 
         return events
 
@@ -798,8 +821,8 @@ class GridAgent:
                     f"(동의율={result.agreement_rate:.0f}%, score={score})"
                 )
                 self.notifier.send(format_consensus_for_telegram(result, bot_label=self.bot_label))
-                # 2명 에이전트 + 코디네이터 = 3 호출 (4 체제에서 5 호출 → 60% 절감)
-                self.cost_guard.post_success(signal, result.final_action, num_calls=3)
+                # 2명 에이전트만 호출. 합의는 코드 규칙으로 처리한다.
+                self.cost_guard.post_success(signal, result.final_action, num_calls=2)
                 action = result.final_action
             else:
                 action = self.llm_judge.judge(
@@ -998,7 +1021,9 @@ class GridAgent:
                 self.daily_buy_vol += sz
                 self.daily_buy_cost += cost
                 self.holding_qty += sz
-                self.holding_cost += cost
+                # Include buy fees in cost basis so unrealized/realized PnL
+                # reflects the actual cost of building inventory.
+                self.holding_cost += cost + fee_usdt
                 avg_price = self.holding_cost / self.holding_qty if self.holding_qty > 0 else px
                 pnl_line = f"평균 매수가: {avg_price:,.2f} USDT"
             else:
@@ -1009,7 +1034,7 @@ class GridAgent:
                 self.daily_sell_revenue += cost
                 if self.holding_qty > 0:
                     avg_buy = self.holding_cost / self.holding_qty
-                    profit = (px - avg_buy) * sz - abs(fee)
+                    profit = (px - avg_buy) * sz - fee_usdt
                     self.realized_pnl += profit
                     self.daily_realized += profit
                     sell_ratio = min(sz / self.holding_qty, 1.0)
@@ -1120,18 +1145,90 @@ class GridAgent:
 
     # ─── 수수료 컨텍스트 ─────────────────────────────────────
 
+    def _position_metrics(self, current_price: float) -> dict:
+        """Return risk/PnL metrics using current inventory, not stale entry_price."""
+        try:
+            qty = max(float(self.holding_qty or 0.0), 0.0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        try:
+            holding_cost = max(float(self.holding_cost or 0.0), 0.0)
+        except (TypeError, ValueError):
+            holding_cost = 0.0
+        try:
+            realized = float(self.realized_pnl or 0.0)
+        except (TypeError, ValueError):
+            realized = 0.0
+        try:
+            entry = float(self.entry_price) if self.entry_price not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            entry = 0.0
+
+        avg_buy = holding_cost / qty if qty > 0 else 0.0
+        exposure = qty * current_price if qty > 0 else 0.0
+        unrealized = (current_price - avg_buy) * qty if avg_buy > 0 else 0.0
+        total_pnl = realized + unrealized
+        grid_budget = float(getattr(config, "GRID_BUDGET", 0.0) or 0.0)
+        total_pnl_pct = (total_pnl / grid_budget * 100) if grid_budget > 0 else 0.0
+        price_loss_pct = ((avg_buy - current_price) / avg_buy * 100) if avg_buy > 0 else 0.0
+        entry_loss_pct = ((entry - current_price) / entry * 100) if entry > 0 else 0.0
+
+        return {
+            "qty": qty,
+            "holding_cost": holding_cost,
+            "avg_buy": avg_buy,
+            "exposure": exposure,
+            "unrealized": unrealized,
+            "realized": realized,
+            "total_pnl": total_pnl,
+            "grid_budget": grid_budget,
+            "total_pnl_pct": total_pnl_pct,
+            "price_loss_pct": price_loss_pct,
+            "entry_price": entry,
+            "entry_loss_pct": entry_loss_pct,
+        }
+
+    def _stop_loss_status(self, current_price: float) -> dict:
+        """Stop-loss status from average cost and total grid drawdown."""
+        metrics = self._position_metrics(current_price)
+        threshold = float(getattr(config, "MAX_LOSS_PERCENT", 15.0) or 15.0)
+        reasons = []
+
+        if metrics["avg_buy"] > 0 and metrics["price_loss_pct"] >= threshold:
+            reasons.append(
+                f"평균단가 대비 손실 {metrics['price_loss_pct']:.2f}% >= {threshold:.2f}%"
+            )
+        if metrics["grid_budget"] > 0 and metrics["total_pnl_pct"] <= -threshold:
+            reasons.append(
+                f"그리드 예산 대비 총손익 {metrics['total_pnl_pct']:.2f}% <= -{threshold:.2f}%"
+            )
+        if metrics["avg_buy"] <= 0 and metrics["entry_price"] > 0 and metrics["entry_loss_pct"] >= threshold:
+            reasons.append(
+                f"진입가 대비 손실 {metrics['entry_loss_pct']:.2f}% >= {threshold:.2f}%"
+            )
+
+        basis_price = metrics["avg_buy"] or metrics["entry_price"]
+        basis = "avg_cost" if metrics["avg_buy"] > 0 else "entry_price"
+        return {
+            **metrics,
+            "basis_price": basis_price,
+            "basis": basis,
+            "triggered": bool(reasons),
+            "reason": "; ".join(reasons),
+        }
+
     def _build_fee_context(self, current_price: float) -> str:
         """에이전트에게 제공할 수수료/손익/운영 컨텍스트.
 
         그리드봇 헌법 ④: LLM이 "정지의 비용"을 숫자로 인식하도록
         누적 수익, 일평균 수익, 일일 기회비용, 운영 기간을 함께 주입.
         """
-        # 미실현 손익
-        unrealized = 0.0
-        avg_buy = 0.0
-        if self.holding_qty > 0:
-            avg_buy = self.holding_cost / self.holding_qty
-            unrealized = (current_price - avg_buy) * self.holding_qty
+        metrics = self._position_metrics(current_price)
+        unrealized = metrics["unrealized"]
+        avg_buy = metrics["avg_buy"]
+        total_pnl = metrics["total_pnl"]
+        total_pnl_pct = metrics["total_pnl_pct"]
+        price_loss_pct = metrics["price_loss_pct"]
 
         # 1시간 내 그리드 재시작 횟수
         now = datetime.now()
@@ -1153,6 +1250,7 @@ class GridAgent:
         return (
             f"\n=== 봇 운영 현황 (정지의 기회비용 인식용) ===\n"
             f"누적 실현 손익: {self.realized_pnl:+,.2f} USDT\n"
+            f"총 손익(실현+미실현): {total_pnl:+,.2f} USDT ({total_pnl_pct:+.2f}% of grid budget)\n"
             f"누적 수수료: {self.total_fees_paid:,.2f} USDT\n"
             f"운영 기간(추정): {running_days:.1f}일\n"
             f"일평균 실현 손익: {avg_daily_pnl:+,.2f} USDT/일\n"
@@ -1166,6 +1264,7 @@ class GridAgent:
             f"최근 1시간 재시작: {len(recent_restarts)}회\n"
             f"\n=== 포지션 ===\n"
             f"미실현 손익: {unrealized:+,.4f} USDT\n"
+            f"평균단 대비 가격 손익: {-price_loss_pct:+.2f}%\n"
             f"보유 수량: {self.holding_qty:.6f} (평균 매수가: {avg_buy:,.2f})\n"
             f"\n=== 액션 비용 ===\n"
             f"WIDEN/SHIFT 시 예상 수수료: ~{est_restart_fee:,.2f} USDT (1회)\n"
@@ -1289,14 +1388,21 @@ class GridAgent:
         if len(recent) >= 2:
             return False, f"1시간 내 재시작 {len(recent)}회 도달 (최대 2회)"
 
-        # 수수료 가드: 예상 수수료 > 최근 실현 수익이면 차단
-        if self.holding_qty > 0:
-            est_fee = self.holding_qty * current_price * 0.002
-            if self.daily_realized > 0 and est_fee > self.daily_realized * 0.5:
-                return False, (
-                    f"수수료 비효율: 예상 수수료 ~{est_fee:,.4f} > "
-                    f"실현 수익의 50% ({self.daily_realized * 0.5:,.4f})"
-                )
+        # 수수료 가드: 예상 수수료 > 최근 실현 수익이면 차단.
+        # WIDEN is especially dangerous because it restarts the bot while keeping
+        # the same inventory risk; require either realized edge or a breakout/risk reason.
+        metrics = self._position_metrics(current_price)
+        est_fee = metrics["exposure"] * 0.002 if metrics["exposure"] > 0 else 0.0
+        if self.daily_realized > 0 and est_fee > self.daily_realized * 0.5:
+            return False, (
+                f"수수료 비효율: 예상 수수료 ~{est_fee:,.4f} > "
+                f"실현 수익의 50% ({self.daily_realized * 0.5:,.4f})"
+            )
+        if action == "WIDEN" and self.daily_realized <= 0 and metrics["total_pnl"] < 0:
+            return False, (
+                f"WIDEN 보류: 당일 실현 수익이 없고 총손익이 "
+                f"{metrics['total_pnl']:+,.2f} USDT"
+            )
 
         return True, ""
 
@@ -1414,7 +1520,15 @@ class GridAgent:
         self.holding_qty = float(state.get("holding_qty", 0.0))
         self.holding_cost = float(state.get("holding_cost", 0.0))
         self.realized_pnl = float(state.get("realized_pnl", 0.0))
-        self.entry_price = state.get("entry_price")
+        raw_entry_price = state.get("entry_price")
+        try:
+            self.entry_price = (
+                float(raw_entry_price)
+                if raw_entry_price not in (None, "")
+                else None
+            )
+        except (TypeError, ValueError):
+            self.entry_price = None
         self.last_fill_id = state.get("last_fill_id")
 
         # 당일 카운터: 같은 날짜일 때만 복원
@@ -1454,7 +1568,7 @@ class GridAgent:
         """
         가격이 그리드 범위를 이탈했는지 감지.
         - 이탈 직후: 알림 + 대기
-        - 6시간 이상 이탈: 에이전트에게 재배치 판단 요청
+        - BREAKOUT_WAIT_HOURS 이상 이탈: 에이전트에게 재배치 판단 요청
         - 복귀 시: 타이머 리셋
         Returns: 오버라이드할 액션 or None (정상 흐름)
         """
@@ -1495,6 +1609,7 @@ class GridAgent:
         elapsed = (now - self.grid_breakout_time).total_seconds()
         elapsed_min = elapsed / 60
         elapsed_hr = elapsed / 3600
+        wait_hr = self.BREAKOUT_WAIT_SEC / 3600
 
         # 이탈 알림 (최초 1회)
         if not self.grid_breakout_notified:
@@ -1515,7 +1630,7 @@ class GridAgent:
                 f"{'━' * 28}\n"
                 f"범위: {gl:,.2f} ~ {gu:,.2f}\n"
                 f"{'─' * 28}\n"
-                f"⏳ 6시간 대기 후 재배치 여부 판단\n"
+                f"⏳ {wait_hr:.0f}시간 대기 후 재배치 여부 판단\n"
                 f"가격이 범위로 돌아오면 자동 매매 재개"
             )
 
@@ -1527,7 +1642,8 @@ class GridAgent:
                 f"→ LLM 건너뛰고 강제 재배치",
                 level="WARNING"
             )
-            allowed, skip_reason = self._check_restart_allowed("SHIFT_UP", price)
+            forced_action = "SHIFT_UP" if direction == "ABOVE" else "SHIFT_DOWN"
+            allowed, skip_reason = self._check_restart_allowed(forced_action, price)
             if not allowed:
                 self._log(f"수수료 가드 차단: {skip_reason} → 대기 유지", level="WARNING")
                 self.notifier.send(
@@ -1560,12 +1676,13 @@ class GridAgent:
             )
             return "MAINTAIN"
 
-        # ── 6시간 이상 이탈 → 에이전트에게 재배치 판단 요청 ──
+        # ── BREAKOUT_WAIT_HOURS 이상 이탈 → 에이전트에게 재배치 판단 요청 ──
         if elapsed >= self.BREAKOUT_WAIT_SEC:
             self._log(f"그리드 이탈 {elapsed_hr:.1f}시간 경과 → 에이전트 재배치 판단 요청")
 
             # 수수료 가드 체크
-            allowed, skip_reason = self._check_restart_allowed("SHIFT_UP", price)
+            candidate_action = "SHIFT_UP" if direction == "ABOVE" else "SHIFT_DOWN"
+            allowed, skip_reason = self._check_restart_allowed(candidate_action, price)
             if not allowed:
                 self._log(f"수수료 가드: {skip_reason} → 대기 유지")
                 return "MAINTAIN"
@@ -1579,7 +1696,7 @@ class GridAgent:
                 f"현재 그리드: {gl:,.2f} ~ {gu:,.2f}\n"
                 f"현재가: {price:,.2f}\n"
                 f"그리드 범위로 돌아올 가능성과 재배치 수수료를 비교해서 판단하세요.\n"
-                f"재배치 = WIDEN, 계속 대기 = MAINTAIN\n"
+                f"재배치 = WIDEN/SHIFT, 계속 대기 = MAINTAIN\n"
             )
 
             try:
@@ -1605,11 +1722,14 @@ class GridAgent:
                         f"LLM 결정: {action}"
                     )
 
-                if action == "WIDEN":
-                    # 재배치 실행
+                if action in ("WIDEN", "SHIFT_UP", "SHIFT_DOWN"):
+                    # 재배치 실행. WIDEN keeps the action semantics; SHIFT recenters.
                     self._record_grid_restart()
                     old_lower, old_upper = gl, gu
-                    self.controller.shift_grid_center(price, price)
+                    if action == "WIDEN":
+                        self.controller.widen_grid(signal.atr_current, price)
+                    else:
+                        self.controller.shift_grid_center(price, price)
                     self._refresh_bot_label()
                     self.grid_breakout_time = None
                     self.grid_breakout_dir = None
@@ -1617,6 +1737,7 @@ class GridAgent:
                     self.notifier.send(
                         f"🔄 이탈 후 그리드 재배치 | {config.SYMBOL}\n"
                         f"{'─' * 28}\n"
+                        f"액션: {action}\n"
                         f"이전: {old_lower:,.2f} ~ {old_upper:,.2f}\n"
                         f"새 범위: {self.controller.current_lower:,.2f} ~ "
                         f"{self.controller.current_upper:,.2f}\n"
@@ -1635,7 +1756,7 @@ class GridAgent:
                 self._log(f"이탈 재배치 판단 실패: {e}", level="ERROR")
                 return "MAINTAIN"
 
-        # 6시간 미만 이탈 → 대기
+        # 대기 시간 미만 이탈 → 대기
         if self.loop_count % 5 == 0:  # 5틱마다 대기 알림
             self.notifier.send(
                 f"⏳ 그리드 이탈 대기 중 | {config.SYMBOL}\n"
@@ -2007,12 +2128,11 @@ class GridAgent:
     # ─── 손절 체크 ─────────────────────────────────────────
 
     def _check_stop_loss(self, current_price: float) -> bool:
-        """진입가 대비 config.MAX_LOSS_PERCENT 이상 손실 시 True."""
-        if self.entry_price is None:
+        """Return True when average-cost or total-grid drawdown reaches the stop limit."""
+        if self.entry_price is None and self.holding_qty <= 0:
             self.entry_price = current_price
             return False
-        loss_pct = (self.entry_price - current_price) / self.entry_price * 100
-        return loss_pct >= config.MAX_LOSS_PERCENT
+        return bool(self._stop_loss_status(current_price)["triggered"])
 
     # ─── 로그 ──────────────────────────────────────────────
 

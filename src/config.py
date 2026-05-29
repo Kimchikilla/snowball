@@ -96,7 +96,7 @@ MAX_LOSS_PERCENT = _env_float("MAX_LOSS_PERCENT", 15.0)
 
 # ─── 그리드 이탈 대응 ──────────────────────────────────
 # 이탈 후 LLM에게 재배치 판단 요청까지 대기 (시간)
-BREAKOUT_WAIT_HOURS = _env_int("BREAKOUT_WAIT_HOURS", 6)
+BREAKOUT_WAIT_HOURS = _env_int("BREAKOUT_WAIT_HOURS", 24)
 # 이 시간 초과 시 LLM 판단 무시하고 강제 SHIFT (수수료 가드는 여전히 적용)
 BREAKOUT_HARD_TIMEOUT_HOURS = _env_int("BREAKOUT_HARD_TIMEOUT_HOURS", 48)
 

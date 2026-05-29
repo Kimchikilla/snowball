@@ -305,10 +305,9 @@ class RecoveryCascade:
     @staticmethod
     def rule_based_fallback(risk_score: float, trend: str, trend_strength: float) -> str:
         """Level 1: 룰 베이스 폴백 (API 호출 없음)."""
-        if risk_score >= 90:
-            return "STOP"
-        if risk_score >= 60:
-            return "WIDEN"
+        # LLM이 실패했거나 예산/서킷브레이커로 막힌 상황에서 score만 보고
+        # 재시작/정지를 실행하면 단발성 spike에 취약하다. 재배치와 손절은
+        # main_agent의 이탈 타이머/손절 코드가 별도로 처리한다.
         return "MAINTAIN"
 
 

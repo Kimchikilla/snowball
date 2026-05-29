@@ -160,11 +160,12 @@ class GridController:
         # 없으면 새로 시작
         return self.start_grid(lower, upper, count)
 
-    def start_grid(self, lower=None, upper=None, count=None) -> dict:
+    def start_grid(self, lower=None, upper=None, count=None, mode=None) -> dict:
         """새 그리드봇을 시작합니다."""
         lower = lower or GRID_LOWER
         upper = upper or GRID_UPPER
         count = count or GRID_COUNT
+        mode = mode or self.current_mode or GRID_MODE
 
         body = {
             "instId":       SYMBOL,
@@ -172,7 +173,7 @@ class GridController:
             "maxPx":        str(upper),
             "minPx":        str(lower),
             "gridNum":      str(count),
-            "runType":      "1" if GRID_MODE == "arithmetic" else "2",
+            "runType":      "1" if mode == "arithmetic" else "2",
             "quoteSz":      str(GRID_BUDGET),
         }
         resp = self._post("/api/v5/tradingBot/grid/order-algo", body)
@@ -187,7 +188,7 @@ class GridController:
                 self.current_lower = float(lower)
                 self.current_upper = float(upper)
                 self.current_grid_num = int(count)
-                self.current_mode = GRID_MODE
+                self.current_mode = mode
                 self._log(f"그리드봇 시작 | bot_id={self.bot_id} | 범위={lower}~{upper} | {count}개 그리드")
             except Exception as e:
                 self._log(f"그리드봇 시작 응답 파싱 실패: {e}", level="ERROR")
@@ -207,14 +208,30 @@ class GridController:
         if not self.bot_id:
             return {"status": "no_bot"}
 
-        wide_range = atr_value * 2    # ATR의 2배를 상하로 적용
-        new_lower  = max(current_price - wide_range, GRID_LOWER * 0.8)
-        new_upper  = min(current_price + wide_range, GRID_UPPER * 1.2)
+        current_range = (
+            self.current_upper - self.current_lower
+            if self.current_lower is not None and self.current_upper is not None
+            else GRID_UPPER - GRID_LOWER
+        )
+        # WIDEN must never shrink the active grid. ATR from 1m candles can be tiny,
+        # so use it only as a floor alongside the current range.
+        new_range = max(current_range * 1.25, atr_value * 8, current_price * 0.08)
+        half_range = new_range / 2
+        new_lower  = max(current_price - half_range, current_price * 0.2, 0.0001)
+        new_upper  = current_price + half_range
+        if new_upper <= new_lower:
+            new_lower = current_price - current_range / 2
+            new_upper = current_price + current_range / 2
 
         self._log(f"그리드 간격 확대 | 새 범위={new_lower:.0f}~{new_upper:.0f} (ATR={atr_value:.1f})")
 
         self.stop_grid(sell_remaining=False)
-        return self.start_grid(lower=new_lower, upper=new_upper, count=GRID_COUNT)
+        return self.start_grid(
+            lower=new_lower,
+            upper=new_upper,
+            count=self.current_grid_num or GRID_COUNT,
+            mode=self.current_mode or GRID_MODE,
+        )
 
     def emergency_stop(self) -> dict:
         """
@@ -552,7 +569,12 @@ class GridController:
         )
 
         self.stop_grid(sell_remaining=False)
-        resp = self.start_grid(lower=new_lower, upper=new_upper, count=GRID_COUNT)
+        resp = self.start_grid(
+            lower=new_lower,
+            upper=new_upper,
+            count=self.current_grid_num or GRID_COUNT,
+            mode=self.current_mode or GRID_MODE,
+        )
         return resp
 
     # ─── 주문 관리 ───────────────────────────────────────────
