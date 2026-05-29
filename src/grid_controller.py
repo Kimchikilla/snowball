@@ -646,8 +646,21 @@ class GridController:
             "OK-ACCESS-TIMESTAMP":  ts,
             "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
             "Content-Type":         "application/json",
+            "Accept":               "application/json",
+            "User-Agent":           "snowball-agent/1.0",
             **({"x-simulated-trading": "1"} if DEMO_MODE else {}),
         }
+
+    @staticmethod
+    def _response_debug(r: httpx.Response) -> str:
+        """Short non-sensitive response summary for OKX parse failures."""
+        content_type = r.headers.get("content-type", "-")
+        text = (r.text or "").replace("\r", " ").replace("\n", " ").strip()
+        if len(text) > 240:
+            text = text[:240] + "..."
+        if not text:
+            text = "<empty>"
+        return f"status={r.status_code} content-type={content_type} body={text}"
 
     def _post(self, path: str, body: dict) -> dict:
         body_str = json.dumps(body)
@@ -659,7 +672,11 @@ class GridController:
                 try:
                     return r.json()
                 except (json.JSONDecodeError, ValueError) as e:
-                    self._log(f"POST {path} JSON 파싱 실패 (시도 {attempt}/{_MAX_RETRIES}): {e}", level="ERROR")
+                    self._log(
+                        f"POST {path} JSON 파싱 실패 (시도 {attempt}/{_MAX_RETRIES}): "
+                        f"{e} | {self._response_debug(r)}",
+                        level="ERROR",
+                    )
                     last_err = e
             except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as e:
                 self._log(f"POST {path} 네트워크 오류 (시도 {attempt}/{_MAX_RETRIES}): {e}", level="ERROR")
@@ -683,7 +700,11 @@ class GridController:
                 try:
                     return r.json()
                 except (json.JSONDecodeError, ValueError) as e:
-                    self._log(f"GET {path} JSON 파싱 실패 (시도 {attempt}/{_MAX_RETRIES}): {e}", level="ERROR")
+                    self._log(
+                        f"GET {path} JSON 파싱 실패 (시도 {attempt}/{_MAX_RETRIES}): "
+                        f"{e} | {self._response_debug(r)}",
+                        level="ERROR",
+                    )
                     last_err = e
             except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as e:
                 self._log(f"GET {path} 네트워크 오류 (시도 {attempt}/{_MAX_RETRIES}): {e}", level="ERROR")
